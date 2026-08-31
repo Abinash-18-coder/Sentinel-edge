@@ -1,0 +1,41 @@
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# Weights, Models & Large Artifacts
+*.pt
+*.onnx
+*.engine
+*.bin
+models/weights/*
+!models/weights/.gitkeep
+models/onnx/*
+!models/onnx/.gitkeep
+
+# Data & Training Runs
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+runs/
+wandb/
+*.mp4
+*.avi
+*.jpg
+*.jpeg
+*.png
+
+# Logs & Environment Variables
+*.log
+.env
+.DS_Store
+Thumbs.db
