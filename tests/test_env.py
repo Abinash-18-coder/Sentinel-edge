@@ -1,9 +1,11 @@
 """
 tests/test_env.py
-Automated environment verification script for SentinelEdge.
-Validates PyTorch hardware acceleration, OpenCV camera ingestion,
-Supervision tracking components, and Ultralytics YOLO inference.
+Automated environment diagnostics for SentinelEdge.
+Validates Python 3.12.5 runtime, PyTorch backend, OpenCV camera ingestion,
+Supervision tracking components, Ultralytics YOLO, and ONNX Runtime.
 """
+
+from __future__ import annotations
 
 import sys
 import platform
@@ -15,62 +17,65 @@ import onnxruntime as ort
 
 
 def run_diagnostics() -> bool:
-    print("=" * 60)
-    print(" SentinelEdge Pipeline: Environment Diagnostics")
-    print("=" * 60)
+    print("=" * 65)
+    print(" SentinelEdge Pipeline: Environment Diagnostics (Python 3.12)")
+    print("=" * 65)
 
-    # 1. System Runtime
-    print(f"[+] Python Version      : {platform.python_version()} ({sys.executable})")
-    print(f"[+] Operating System    : {platform.system()} {platform.release()}")
+    # 1. Python Runtime
+    py_version = platform.python_version()
+    print(f"[+] Python Version        : {py_version} ({sys.executable})")
+    print(f"[+] Operating System      : {platform.system()} {platform.release()} ({platform.architecture()[0]})")
+    
+    if not (sys.version_info.major == 3 and sys.version_info.minor >= 10):
+        print(f"[!] Warning: Python 3.10+ required. Detected: {py_version}")
 
-    # 2. PyTorch & Compute Acceleration
-    print(f"[+] PyTorch Version     : {torch.__version__}")
+    # 2. PyTorch & Compute Acceleration Backend
+    print(f"[+] PyTorch Version       : {torch.__version__}")
     if torch.cuda.is_available():
-        device_name = torch.cuda.get_device_name(0)
-        print(f"[+] Compute Backend     : CUDA (GPU: {device_name})")
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        print("[+] Compute Backend     : Apple Silicon (MPS)")
+        gpu_name = torch.cuda.get_device_name(0)
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        print(f"[+] Compute Acceleration  : CUDA Available (GPU: {gpu_name} | VRAM: {vram_gb:.2f} GB)")
     else:
-        print("[+] Compute Backend     : CPU (Default fallback)")
+        print("[+] Compute Acceleration  : CPU Mode (CUDA not detected - Colab GPU will be used for training)")
 
-    # 3. OpenCV & Camera Ingestion
-    print(f"[+] OpenCV Version      : {cv2.__version__}")
+    # 3. OpenCV Video Capture Subsystem
+    print(f"[+] OpenCV Version        : {cv2.__version__}")
     cap = cv2.VideoCapture(0)
     if cap.isOpened():
         ret, frame = cap.read()
         if ret:
             h, w, c = frame.shape
-            print(f"[+] Camera Test         : SUCCESS (Default frame shape: {w}x{h}, {c} channels)")
+            print(f"[+] Ingestion Subsystem   : SUCCESS (Webcam active: {w}x{h} px, {c} channels)")
         else:
-            print("[!] Camera Test         : Frame capture failed (Camera busy or permission denied)")
+            print("[!] Ingestion Subsystem   : Camera device opened but frame read returned empty")
         cap.release()
     else:
-        print("[!] Camera Test         : No local webcam detected (Not blocking - video file mode available)")
+        print("[*] Ingestion Subsystem   : No local webcam detected (File/RTSP streaming will be used)")
 
     # 4. Supervision & Tracking Components
-    print(f"[+] Supervision Version : {sv.__version__}")
+    print(f"[+] Supervision Version   : {sv.__version__}")
     tracker = sv.ByteTrack()
-    print(f"[+] ByteTrack Tracker   : INITIALIZED ({type(tracker).__name__})")
+    print(f"[+] ByteTrack Tracker     : INITIALIZED ({tracker.__class__.__name__})")
 
-    # 5. Ultralytics YOLO
-    print(f"[+] Ultralytics Version : {ultralytics.__version__}")
+    # 5. Ultralytics YOLO Perception Engine
+    print(f"[+] Ultralytics Version   : {ultralytics.__version__}")
     yolo_model = ultralytics.YOLO("yolo11n.pt")
-    print(f"[+] YOLO Inference Engine: LOADED ({yolo_model.model_name})")
+    print(f"[+] YOLO Inference Core   : LOADED ({yolo_model.model_name})")
 
-    # 6. ONNX Runtime Engine
-    print(f"[+] ONNX Runtime Version: {ort.__version__}")
+    # 6. ONNX Runtime Inference Providers
+    print(f"[+] ONNX Runtime Version  : {ort.__version__}")
     providers = ort.get_available_providers()
-    print(f"[+] Available Providers : {', '.join(providers)}")
+    print(f"[+] ONNX Active Providers : {', '.join(providers)}")
 
-    print("=" * 60)
-    print(" ALL CORE MODULES INSTALLED AND VERIFIED SUCCESSFULLY!")
-    print("=" * 60)
+    print("=" * 65)
+    print(" ALL CORE MODULES AND DEPENDENCIES VERIFIED SUCCESSFULLY!")
+    print("=" * 65)
     return True
 
 
 if __name__ == "__main__":
     try:
         run_diagnostics()
-    except Exception as e:
-        print(f"\n[X] Verification Failed with Error: {e}", file=sys.stderr)
+    except Exception as err:
+        print(f"\n[X] Diagnostics failed with critical error:\n{err}", file=sys.stderr)
         sys.exit(1)

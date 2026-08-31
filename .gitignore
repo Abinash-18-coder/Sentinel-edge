@@ -5,13 +5,13 @@ __pycache__/
 *.so
 .pytest_cache/
 
-# Virtual Environment
+# Virtual Environments
 venv/
 env/
 ENV/
 .venv/
 
-# Weights, Models & Large Artifacts
+# Large Model Binaries & Checkpoints (Managed locally / Colab)
 *.pt
 *.onnx
 *.engine
@@ -21,11 +21,14 @@ models/weights/*
 models/onnx/*
 !models/onnx/.gitkeep
 
-# Data & Training Runs
+# Raw Datasets, Video Feeds & Local Renders
 data/raw/*
 !data/raw/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
+data/processed/verification_renders/*
+data/calibration/*
+!data/calibration/.gitkeep
 runs/
 wandb/
 *.mp4
@@ -34,7 +37,7 @@ wandb/
 *.jpeg
 *.png
 
-# Logs & Environment Variables
+# Logs, System Files & Environment Variables
 *.log
 .env
 .DS_Store
