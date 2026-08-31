@@ -1,0 +1,15 @@
+# configs/data.yaml
+# Dataset root directory using explicit local path
+path: C:/Users/Abinash/Desktop/PROJECT/Sentinel-Edge/data/processed
+
+# Split directories relative to 'path'
+train: train/images
+val: val/images
+test: test/images
+
+# Class Index Mapping
+names:
+  0: normal_surface
+  1: crack
+  2: corrosion
+  3: structural_defect
