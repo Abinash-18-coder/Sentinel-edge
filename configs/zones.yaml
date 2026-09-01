@@ -1,0 +1,25 @@
+# configs/zones.yaml
+# Normalized spatial rules and state-machine timing parameters
+
+zones:
+  - id: "zone_alpha_danger"
+    name: "Restricted Hazardous Perimeter"
+    # Polygon vertices: [[x1, y1], [x2, y2], [x3, y3], [x4, y4]] in normalized [0, 1] coords
+    polygon:
+      - [0.10, 0.20]
+      - [0.45, 0.20]
+      - [0.45, 0.85]
+      - [0.10, 0.85]
+    monitored_classes: [0, 1, 2, 3]
+    dwell_warning_seconds: 1.0      # Dwell time before transitioning to WARNING
+    dwell_breach_seconds: 2.5       # Dwell time before triggering CONFIRMED_ANOMALY
+    cooldown_seconds: 10.0          # Time to suppress duplicate triggers for the same track ID
+
+tripwires:
+  - id: "tripwire_bravo"
+    name: "Perimeter Security Tripwire"
+    # Line vector from start point -> end point
+    start_point: [0.55, 0.10]
+    end_point: [0.90, 0.90]
+    direction: "bidirectional"      # Options: "in", "out", "bidirectional"
+    monitored_classes: [0, 1, 2, 3]
