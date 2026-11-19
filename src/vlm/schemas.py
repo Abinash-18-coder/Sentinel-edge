@@ -1,14 +1,12 @@
-"""
-src/vlm/schemas.py
-Pydantic data models enforcing strict schema validation and spatial visual
-grounding coordinates on VLM incident reports.
-Compatible with Python 3.12.5 on Windows.
-"""
+import sys
+from pathlib import Path
 
-from __future__ import annotations
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class IncidentSeverity(str, Enum):
@@ -19,23 +17,40 @@ class IncidentSeverity(str, Enum):
 
 
 class GroundingBoundingBox(BaseModel):
-    """Normalized bounding coordinates [ymin, xmin, ymax, xmax] in [0, 1000] scale."""
-    ymin: int = Field(ge=0, le=1000, description="Top-most boundary coordinate")
-    xmin: int = Field(ge=0, le=1000, description="Left-most boundary coordinate")
-    ymax: int = Field(ge=0, le=1000, description="Bottom-most boundary coordinate")
-    xmax: int = Field(ge=0, le=1000, description="Right-most boundary coordinate")
+    ymin: int = Field(ge=0, le=1000)
+    xmin: int = Field(ge=0, le=1000)
+    ymax: int = Field(ge=0, le=1000)
+    xmax: int = Field(ge=0, le=1000)
+
+    @model_validator(mode="after")
+    def ensure_ordered_coordinates(self) -> "GroundingBoundingBox":
+        if self.ymin > self.ymax:
+            self.ymin, self.ymax = self.ymax, self.ymin
+        if self.xmin > self.xmax:
+            self.xmin, self.xmax = self.xmax, self.xmin
+        if self.ymax == self.ymin:
+            self.ymax = min(1000, self.ymin + 10)
+        if self.xmax == self.xmin:
+            self.xmax = min(1000, self.xmin + 10)
+        return self
+
+
+class RawVLMOutput(BaseModel):
+    scene_description: str = Field(min_length=3, max_length=300)
+    box_2d: list[int] = Field(min_length=4, max_length=4)
+    severity: IncidentSeverity
+    recommended_action: str = Field(min_length=3, max_length=120)
 
 
 class IncidentAuditReport(BaseModel):
-    """Validated structured incident report produced by Qwen2.5-VL / SmolVLM."""
-    incident_id: str = Field(description="Unique identifier of the incident")
-    timestamp: str = Field(description="ISO-8601 formatted timestamp")
-    zone_id: str = Field(description="Spatial zone ID where breach occurred")
-    track_id: int = Field(description="Re-ID tracking identifier of the entity")
-    entity_class: str = Field(description="Detected object class (worker, crack, etc.)")
-    vlm_scene_description: str = Field(description="Natural-language description of the visual scene")
-    hazard_grounding_box: GroundingBoundingBox = Field(
-        description="Localized bounding box of the specific hazard or violation"
-    )
-    severity: IncidentSeverity = Field(description="Risk assessment: LOW, MEDIUM, HIGH, CRITICAL")
-    recommended_action: str = Field(description="Recommended action in under 10 words")
+    incident_id: str
+    timestamp: str
+    zone_id: str
+    track_id: int
+    entity_class: str
+    vlm_scene_description: str
+    hazard_grounding_box: GroundingBoundingBox
+    severity: IncidentSeverity
+    recommended_action: str
+    audit_backend: str
+    audit_latency_ms: float = Field(ge=0.0)
