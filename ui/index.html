@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SentinelEdge v2.0 | Edge Vision & Grounded VLM Operations</title>
+  <title>SentinelEdge v2.0 | Edge Vision, DuckDB & Grounded VLM</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body { background-color: #090d16; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -23,6 +23,7 @@
       <span id="sourceBadge" class="text-xs font-mono bg-slate-900 text-slate-400 px-2.5 py-1 rounded border border-slate-800">SRC: --</span>
     </div>
     <div class="flex items-center space-x-2">
+      <button id="toggleHeatmapBtn" class="text-xs bg-indigo-700 hover:bg-indigo-600 text-white px-3 py-1.5 rounded font-medium transition">Show Heatmap</button>
       <a href="/api/export/csv" class="text-xs bg-slate-800 hover:bg-slate-700 text-sky-300 px-3 py-1.5 rounded font-medium border border-slate-700 transition">Export CSV</a>
       <a href="/api/export/pdf" class="text-xs bg-sky-600 hover:bg-sky-500 text-white px-3 py-1.5 rounded font-medium transition">Export PDF Audit</a>
     </div>
@@ -33,11 +34,15 @@
     <div class="lg:col-span-8 space-y-4">
       <div class="hud-card p-3 relative flex flex-col items-center justify-center min-h-[460px]">
         <canvas id="videoCanvas" width="640" height="480" class="rounded bg-black shadow-xl w-full max-w-[720px] aspect-[4/3]"></canvas>
+        <img id="heatmapView" alt="Spatial Dwell Heatmap" class="hidden rounded bg-black shadow-xl w-full max-w-[720px] aspect-[4/3] object-contain" />
         <div id="connectionStatus" class="absolute top-5 left-5 text-xs font-mono bg-black/80 px-2.5 py-1 rounded text-amber-400 border border-amber-500/40">
           CONNECTING...
         </div>
-        <div id="bufferBadge" class="absolute top-5 right-5 text-xs font-mono bg-black/80 px-2.5 py-1 rounded text-slate-300 border border-slate-700">
-          RING BUF: 0.0 MB
+        <div class="absolute top-5 right-5 flex items-center space-x-2">
+          <button id="resetHeatmapBtn" class="hidden text-[11px] font-mono bg-rose-900/90 hover:bg-rose-800 text-rose-200 px-2 py-1 rounded border border-rose-700">RESET GRID</button>
+          <div id="bufferBadge" class="text-xs font-mono bg-black/80 px-2.5 py-1 rounded text-slate-300 border border-slate-700">
+            RING BUF: 0.0 MB
+          </div>
         </div>
       </div>
 
@@ -64,16 +69,43 @@
         </div>
       </div>
 
-      <div class="hud-card p-3">
-        <div class="flex justify-between items-center mb-1.5">
-          <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Real-Time Latency Profile (ms / frame)</span>
-          <span class="text-[11px] font-mono text-slate-500">Target Budget: &lt; 33.3 ms (30 FPS)</span>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div class="hud-card p-3">
+          <div class="flex justify-between items-center mb-1.5">
+            <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Real-Time Latency (ms)</span>
+            <span class="text-[11px] font-mono text-slate-500">Budget: &lt; 33.3 ms</span>
+          </div>
+          <canvas id="latencyChart" width="420" height="72" class="w-full h-[72px] rounded bg-slate-950 border border-slate-800"></canvas>
         </div>
-        <canvas id="latencyChart" width="700" height="72" class="w-full h-[72px] rounded bg-slate-950 border border-slate-800"></canvas>
+
+        <div class="hud-card p-3 flex flex-col justify-between">
+          <div class="flex justify-between items-center mb-1.5">
+            <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Embedded DuckDB Telemetry</span>
+            <span class="text-[10px] font-mono bg-emerald-950 text-emerald-300 border border-emerald-800 px-1.5 py-0.5 rounded">WAL MODE</span>
+          </div>
+          <div class="grid grid-cols-4 gap-2 text-center">
+            <div class="bg-slate-950 rounded p-2 border border-slate-800">
+              <p class="text-[10px] text-slate-400 uppercase">DB Breaches</p>
+              <p id="dbBreaches" class="text-sm font-bold font-mono text-white mt-0.5">0</p>
+            </div>
+            <div class="bg-slate-950 rounded p-2 border border-slate-800">
+              <p class="text-[10px] text-slate-400 uppercase">High / Crit</p>
+              <p id="dbHighCrit" class="text-sm font-bold font-mono text-rose-400 mt-0.5">0</p>
+            </div>
+            <div class="bg-slate-950 rounded p-2 border border-slate-800">
+              <p class="text-[10px] text-slate-400 uppercase">Avg Dwell</p>
+              <p id="dbAvgDwell" class="text-sm font-bold font-mono text-amber-300 mt-0.5">0.0s</p>
+            </div>
+            <div class="bg-slate-950 rounded p-2 border border-slate-800">
+              <p class="text-[10px] text-slate-400 uppercase">VLM Avg</p>
+              <p id="dbAvgVlm" class="text-sm font-bold font-mono text-sky-300 mt-0.5">0ms</p>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
-    <div class="lg:col-span-4 hud-card p-4 flex flex-col h-[680px]">
+    <div class="lg:col-span-4 hud-card p-4 flex flex-col h-[700px]">
       <div class="flex justify-between items-center pb-2.5 mb-3 border-b border-slate-800">
         <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-200">Live Incident & VLM Feed</h2>
         <span class="text-[11px] font-mono bg-rose-950 text-rose-300 border border-rose-800 px-2 py-0.5 rounded">GROUNDED AUDIT</span>
@@ -89,6 +121,9 @@
   <script>
     const canvas = document.getElementById('videoCanvas');
     const ctx = canvas.getContext('2d');
+    const heatmapView = document.getElementById('heatmapView');
+    const toggleHeatmapBtn = document.getElementById('toggleHeatmapBtn');
+    const resetHeatmapBtn = document.getElementById('resetHeatmapBtn');
     const chartCanvas = document.getElementById('latencyChart');
     const chartCtx = chartCanvas.getContext('2d');
 
@@ -103,11 +138,60 @@
     const statTracks = document.getElementById('statTracks');
     const statAnomalies = document.getElementById('statAnomalies');
     const statRam = document.getElementById('statRam');
+    const dbBreaches = document.getElementById('dbBreaches');
+    const dbHighCrit = document.getElementById('dbHighCrit');
+    const dbAvgDwell = document.getElementById('dbAvgDwell');
+    const dbAvgVlm = document.getElementById('dbAvgVlm');
     const incidentList = document.getElementById('incidentList');
 
+    let heatmapActive = false;
+    let heatmapTimer = null;
     const latencyHistory = [];
     const MAX_POINTS = 60;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+
+    function refreshHeatmapImage() {
+      if (!heatmapActive) return;
+      heatmapView.src = `/api/analytics/heatmap?overlay_live=true&t=${Date.now()}`;
+    }
+
+    toggleHeatmapBtn.addEventListener('click', () => {
+      heatmapActive = !heatmapActive;
+      if (heatmapActive) {
+        canvas.classList.add('hidden');
+        heatmapView.classList.remove('hidden');
+        resetHeatmapBtn.classList.remove('hidden');
+        toggleHeatmapBtn.textContent = 'Show Live Stream';
+        refreshHeatmapImage();
+        heatmapTimer = setInterval(refreshHeatmapImage, 1500);
+      } else {
+        heatmapView.classList.add('hidden');
+        resetHeatmapBtn.classList.add('hidden');
+        canvas.classList.remove('hidden');
+        toggleHeatmapBtn.textContent = 'Show Heatmap';
+        if (heatmapTimer) clearInterval(heatmapTimer);
+      }
+    });
+
+    resetHeatmapBtn.addEventListener('click', async () => {
+      await fetch('/api/analytics/heatmap/reset', { method: 'POST' });
+      refreshHeatmapImage();
+    });
+
+    async function refreshAnalyticsSummary() {
+      try {
+        const res = await fetch('/api/analytics/summary');
+        if (!res.ok) return;
+        const d = await res.json();
+        dbBreaches.textContent = d.total_breaches ?? 0;
+        const sev = d.severity_breakdown || {};
+        dbHighCrit.textContent = (sev.HIGH || 0) + (sev.CRITICAL || 0);
+        dbAvgDwell.textContent = `${d.avg_dwell_seconds ?? 0}s`;
+        dbAvgVlm.textContent = `${Math.round(d.avg_vlm_latency_ms ?? 0)}ms`;
+      } catch (err) {
+        console.warn('Analytics poll skipped:', err);
+      }
+    }
 
     function severityBadgeClass(sev) {
       const s = (sev || 'PENDING').toUpperCase();
@@ -210,6 +294,7 @@
         link.innerHTML = 'View Grounded Snapshot &rarr;';
         card.appendChild(link);
       }
+      refreshAnalyticsSummary();
     }
 
     async function loadHistoricalIncidents() {
@@ -249,7 +334,7 @@
           sourceBadge.textContent = `SRC: ${d.source}`;
           bufferBadge.textContent = `RING BUF: ${d.buffer_ram_mb} MB`;
           drawLatencySparkline(Number(d.latency_ms) || 0);
-        } else {
+        } else if (!heatmapActive) {
           const blob = new Blob([event.data], { type: 'image/jpeg' });
           if (window.createImageBitmap) {
             createImageBitmap(blob).then((bitmap) => {
@@ -284,12 +369,15 @@
           patchIncidentCard(msg);
         } else {
           renderIncidentCard(msg);
+          refreshAnalyticsSummary();
         }
       };
       ws.onclose = () => setTimeout(connectIncidentWs, 2000);
     }
 
     loadHistoricalIncidents();
+    refreshAnalyticsSummary();
+    setInterval(refreshAnalyticsSummary, 4000);
     connectStreamWs();
     connectIncidentWs();
   </script>

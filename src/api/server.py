@@ -24,6 +24,8 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from src.api.exporter import IncidentExporter
+from src.data.analytics_db import SentinelAnalyticsDB
+from src.data.heatmap_engine import SpatialHeatmapEngine
 from src.vlm.schemas import IncidentAuditReport
 
 
@@ -38,14 +40,18 @@ class PipelineState:
         self.model_name: str = "initializing"
         self.source_label: str = "webcam:0"
         self.latest_jpeg: bytes | None = None
+        self.latest_raw_frame: np.ndarray | None = None
         self.frame_lock = threading.Lock()
         self.connected_stream_clients: list[WebSocket] = []
         self.connected_incident_clients: list[WebSocket] = []
         self.event_loop: asyncio.AbstractEventLoop | None = None
+        self.analytics_db: SentinelAnalyticsDB | None = None
+        self.heatmap_engine: SpatialHeatmapEngine | None = None
 
 
 state = PipelineState()
 INCIDENTS_DIR = PROJECT_ROOT / "data" / "raw" / "incidents"
+ANALYTICS_DIR = PROJECT_ROOT / "data" / "analytics"
 UI_DIR = PROJECT_ROOT / "ui"
 
 
@@ -141,16 +147,39 @@ class VisionPipelineWorker:
                 2,
                 cv2.LINE_AA
             )
+            if state.heatmap_engine is not None and frame_idx % 5 == 0:
+                cx = 160.0 + float((frame_idx * 7) % 180)
+                cy = 200.0 + float((frame_idx * 5) % 120)
+                state.heatmap_engine.add_point(cx, cy, 640, 480)
+                if state.analytics_db is not None:
+                    state.analytics_db.buffer_track_point(
+                        track_id=1,
+                        class_name="crack",
+                        cx=cx,
+                        cy=cy,
+                        frame_w=640,
+                        frame_h=480,
+                        confidence=0.88,
+                        camera_id="synthetic_0"
+                    )
+
             jpeg = self._encode_jpeg(frame, quality=75)
             if jpeg is not None:
                 with state.frame_lock:
                     state.latest_jpeg = jpeg
+                    state.latest_raw_frame = frame
             state.latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
             state.fps = 30.0
             frame_idx += 1
             time.sleep(0.033)
 
     def _on_vlm_report(self, report: IncidentAuditReport) -> None:
+        if state.analytics_db is not None:
+            try:
+                state.analytics_db.log_vlm_audit(report)
+            except Exception as err:
+                print(f"[!] [DUCKDB] Failed logging VLM audit {report.incident_id}: {err}")
+
         grounded_name = f"{report.incident_id}_vlm_report.grounded.jpg"
         schedule_incident_broadcast({
             "type": "vlm_update",
@@ -222,6 +251,7 @@ class VisionPipelineWorker:
         )
 
         prev_time = time.perf_counter()
+        frame_counter = 0
         print(f"[+] [VISION WORKER] Streaming live at {w}x{h} using {state.model_name}")
 
         try:
@@ -249,6 +279,7 @@ class VisionPipelineWorker:
                     )
                     time.sleep(0.05)
 
+                frame_counter += 1
                 results = model.predict(frame, imgsz=640, conf=0.30, verbose=False)[0]
                 tracked_detections, entities = tracker.update(
                     frame_bgr=frame,
@@ -256,6 +287,24 @@ class VisionPipelineWorker:
                     class_name_map=class_map
                 )
                 state.active_tracks = len(entities)
+
+                if entities and frame_counter % 3 == 0:
+                    fh, fw = frame.shape[:2]
+                    for ent in entities:
+                        cx, cy = ent.center_xy
+                        if state.heatmap_engine is not None:
+                            state.heatmap_engine.add_point(cx, cy, fw, fh)
+                        if state.analytics_db is not None:
+                            state.analytics_db.buffer_track_point(
+                                track_id=ent.track_id,
+                                class_name=ent.class_name,
+                                cx=cx,
+                                cy=cy,
+                                frame_w=fw,
+                                frame_h=fh,
+                                confidence=ent.confidence,
+                                camera_id=state.source_label
+                            )
 
                 events = spatial_engine.evaluate(
                     detections=tracked_detections,
@@ -270,6 +319,12 @@ class VisionPipelineWorker:
                     else:
                         ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(ev.timestamp))
                         incident_id = f"incident_{ts_str}_t{ev.track_id}"
+
+                    if state.analytics_db is not None:
+                        try:
+                            state.analytics_db.log_zone_breach(incident_id, ev)
+                        except Exception as err:
+                            print(f"[!] [DUCKDB] Failed logging breach {incident_id}: {err}")
 
                     vlm_json_path = INCIDENTS_DIR / f"{incident_id}_vlm_report.json"
                     async_auditor.submit_task(
@@ -323,6 +378,7 @@ class VisionPipelineWorker:
                 if jpeg is not None:
                     with state.frame_lock:
                         state.latest_jpeg = jpeg
+                        state.latest_raw_frame = frame
 
                 now = time.perf_counter()
                 state.latency_ms = round((now - loop_start) * 1000.0, 2)
@@ -348,11 +404,29 @@ async def lifespan(app: FastAPI):
     global worker
     state.event_loop = asyncio.get_running_loop()
     test_mode = os.getenv("SENTINEL_TEST_MODE", "0") == "1"
+
+    db_file = (
+        ANALYTICS_DIR / "test_analytics_tmp.duckdb"
+        if test_mode
+        else ANALYTICS_DIR / "sentinel_analytics.duckdb"
+    )
+    state.analytics_db = SentinelAnalyticsDB(db_path=db_file, memory_limit="256MB", threads=2)
+    state.heatmap_engine = SpatialHeatmapEngine(resolution_wh=(640, 480))
+
+    if not test_mode:
+        hist_pts = state.analytics_db.fetch_recent_track_points(max_points=3000)
+        if hist_pts:
+            state.heatmap_engine.add_points_batch(hist_pts)
+            print(f"[+] Hydrated spatial heatmap with {len(hist_pts)} historical DuckDB points.")
+
     worker = VisionPipelineWorker(test_mode=test_mode)
     worker.start()
     yield
     if worker is not None:
         worker.stop()
+    if state.analytics_db is not None:
+        state.analytics_db.close()
+        state.analytics_db = None
 
 
 app = FastAPI(title="SentinelEdge v2.0 Operations Server", lifespan=lifespan)
@@ -396,6 +470,33 @@ async def list_incidents(limit: int = 30) -> dict[str, Any]:
     exporter = IncidentExporter(INCIDENTS_DIR)
     records = exporter.load_all_records()
     return {"count": len(records), "incidents": records[:max(1, min(limit, 100))]}
+
+
+@app.get("/api/analytics/summary")
+async def analytics_summary() -> dict[str, Any]:
+    if state.analytics_db is None:
+        raise HTTPException(status_code=503, detail="Analytics database not initialized")
+    return state.analytics_db.get_summary_metrics()
+
+
+@app.get("/api/analytics/heatmap")
+async def analytics_heatmap(overlay_live: bool = True) -> Response:
+    if state.heatmap_engine is None:
+        raise HTTPException(status_code=503, detail="Heatmap engine not initialized")
+    bg_frame = None
+    if overlay_live:
+        with state.frame_lock:
+            if state.latest_raw_frame is not None:
+                bg_frame = state.latest_raw_frame.copy()
+    jpeg_bytes = state.heatmap_engine.render_jpeg(background_bgr=bg_frame, quality=85)
+    return Response(content=jpeg_bytes, media_type="image/jpeg")
+
+
+@app.post("/api/analytics/heatmap/reset")
+async def analytics_heatmap_reset() -> dict[str, str]:
+    if state.heatmap_engine is not None:
+        state.heatmap_engine.reset()
+    return {"status": "heatmap_cleared"}
 
 
 @app.get("/api/snapshots/{filename}")
