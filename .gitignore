@@ -42,3 +42,5 @@ wandb/
 .env
 .DS_Store
 Thumbs.db
+# Dataset archives
+*.zip

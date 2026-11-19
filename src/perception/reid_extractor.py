@@ -1,90 +1,81 @@
-"""
-src/perception/reid_extractor.py
-Deep visual appearance feature extractor generating L2-normalized 512-dim embeddings.
-Employs a lightweight CNN backbone compatible with PyTorch 2.4+ and Python 3.12.5 on Windows.
-"""
+import sys
+from pathlib import Path
 
-from __future__ import annotations
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import cv2
 import numpy as np
 import torch
-import torch.nn as nn
-import torchvision.transforms as T
 import torchvision.models as models
 
 
 class AppearanceEmbeddingExtractor:
-    """
-    Extracts L2-normalized 512-dimensional appearance vectors from cropped entity images.
-    """
-
-    def __init__(self, device: str | None = None) -> None:
+    def __init__(self, device: str | None = None, num_threads: int = 4) -> None:
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
 
-        print(f"[*] Initializing Appearance Re-ID Extractor on device: {self.device}...")
+        if self.device.type == "cpu":
+            torch.set_num_threads(num_threads)
 
-        # Load MobileNetV3-Small as a high-speed feature extractor backbone
-        backbone = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.DEFAULT)
-        in_features = backbone.classifier[0].in_features
-
-        # Replace classification head with 512-dim projection embedding layer
-        backbone.classifier = nn.Sequential(
-            nn.Linear(in_features, 512),
-            nn.BatchNorm1d(512)
+        backbone = models.mobilenet_v3_small(
+            weights=models.MobileNet_V3_Small_Weights.DEFAULT
         )
+        self.features = backbone.features.to(self.device).eval()
+        self.avgpool = backbone.avgpool.to(self.device).eval()
+        self.embedding_dim = 576
 
-        self.model = backbone.to(self.device).eval()
+        self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
+        self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
+        self.input_wh = (128, 128)
 
-        # Standard Re-ID input normalization (256x128 resolution)
-        self.transform = T.Compose([
-            T.ToPILImage(),
-            T.Resize((256, 128), interpolation=T.InterpolationMode.BILINEAR),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        print("[+] Re-ID Appearance Extractor initialized successfully.")
+        print(f"[+] Re-ID Extractor ready on {self.device} (576-dim deterministic MobileNetV3-Small)")
 
-    @torch.no_grad()
-    def extract_crops(self, frame_bgr: np.ndarray, boxes_xyxy: np.ndarray) -> np.ndarray:
-        """
-        Extracts L2-normalized embeddings for a list of bounding boxes from a single frame.
-        
-        Args:
-            frame_bgr: Full raw BGR image frame (H, W, C).
-            boxes_xyxy: (N, 4) array of coordinates [x1, y1, x2, y2].
+    def _preprocess_crop(self, crop_bgr: np.ndarray) -> np.ndarray:
+        resized = cv2.resize(crop_bgr, self.input_wh, interpolation=cv2.INTER_LINEAR)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        chw = np.transpose(rgb, (2, 0, 1))
+        return (chw - self.mean) / self.std
 
-        Returns:
-            (N, 512) float32 numpy array of normalized feature embeddings.
-        """
+    def extract_crops(
+        self,
+        frame_bgr: np.ndarray,
+        boxes_xyxy: np.ndarray,
+        max_batch: int = 16
+    ) -> np.ndarray:
         if len(boxes_xyxy) == 0:
-            return np.empty((0, 512), dtype=np.float32)
+            return np.empty((0, self.embedding_dim), dtype=np.float32)
 
         h, w = frame_bgr.shape[:2]
-        crop_tensors: list[torch.Tensor] = []
+        preprocessed: list[np.ndarray] = []
 
         for box in boxes_xyxy:
-            x1, y1, x2, y2 = box.astype(int)
-            # Clip bounds defensively to prevent out-of-frame slicing errors
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w, x2), min(h, y2)
+            x1, y1, x2, y2 = map(int, box)
+            x1 = max(0, min(x1, w - 1))
+            y1 = max(0, min(y1, h - 1))
+            x2 = max(0, min(x2, w))
+            y2 = max(0, min(y2, h))
 
-            # Check for degenerate zero-area crop
-            if (x2 - x1) < 2 or (y2 - y1) < 2:
-                # Provide a synthetic neutral patch
-                crop = np.zeros((256, 128, 3), dtype=np.uint8)
+            if (x2 - x1) < 4 or (y2 - y1) < 4:
+                crop = np.zeros((self.input_wh[1], self.input_wh[0], 3), dtype=np.uint8)
             else:
                 crop = frame_bgr[y1:y2, x1:x2]
-                crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
 
-            crop_tensors.append(self.transform(crop))
+            preprocessed.append(self._preprocess_crop(crop))
 
-        batch = torch.stack(crop_tensors, dim=0).to(self.device)
-        features: torch.Tensor = self.model(batch)
+        all_embeddings: list[np.ndarray] = []
 
-        # Mathematical L2 Normalization across the 512 dimension
-        norm_features = torch.nn.functional.normalize(features, p=2, dim=1)
-        return norm_features.cpu().numpy().astype(np.float32)
+        with torch.inference_mode():
+            for start in range(0, len(preprocessed), max_batch):
+                chunk_np = np.stack(preprocessed[start:start + max_batch], axis=0)
+                batch_tensor = torch.from_numpy(chunk_np).to(self.device)
+                feat_map = self.features(batch_tensor)
+                pooled = self.avgpool(feat_map)
+                flat = torch.flatten(pooled, 1)
+                normed = torch.nn.functional.normalize(flat, p=2, dim=1)
+                all_embeddings.append(normed.cpu().numpy().astype(np.float32))
+
+        return np.vstack(all_embeddings)
