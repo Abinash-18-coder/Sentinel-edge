@@ -4,7 +4,7 @@ torchvision>=0.19.0
 
 # Perception, Detection & Tracking (Supports YOLO11 & YOLO26)
 ultralytics>=8.4.215
-supervision>=0.25.1
+supervision==0.25.1
 opencv-python>=4.11.0.86
 
 # Edge Acceleration & ONNX Runtime

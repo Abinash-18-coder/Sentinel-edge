@@ -1,14 +1,22 @@
-version: "3.8"
-
 services:
-  sentinel-edge:
+  sentineledge:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: sentinel-edge-pipeline
+    image: sentineledge:v2.0
+    container_name: sentineledge-edge-node
     ports:
       - "8000:8000"
+    environment:
+      - SENTINEL_SOURCE=${SENTINEL_SOURCE:-/app/data/raw/test_feed.mp4}
+      - SENTINEL_TEST_MODE=${SENTINEL_TEST_MODE:-0}
+      - VLM_API_URL=${VLM_API_URL:-}
+      - OMP_NUM_THREADS=2
     volumes:
-      - ./data:/app/data
       - ./configs:/app/configs
+      - ./models:/app/models:ro
+      - ./data/raw:/app/data/raw
+      - ./data/analytics:/app/data/analytics
+    mem_limit: 1536m
+    cpus: 2.0
     restart: unless-stopped

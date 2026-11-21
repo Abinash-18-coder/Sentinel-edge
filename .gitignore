@@ -48,3 +48,5 @@ Thumbs.db
 # Embedded DuckDB databases
 *.duckdb
 *.duckdb.wal
+data/raw/incidents/*
+data/analytics/*
