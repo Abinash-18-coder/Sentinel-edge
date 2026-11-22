@@ -76,6 +76,65 @@ ANALYTICS_DIR = PROJECT_ROOT / "data" / "analytics"
 UI_DIR = PROJECT_ROOT / "ui"
 
 
+def draw_crack_detection(annotated: np.ndarray, ent: Any) -> None:
+    img_h, img_w = annotated.shape[:2]
+    bx1, by1, bx2, by2 = map(int, ent.bbox_xyxy)
+    bx1 = max(0, min(bx1, img_w - 2))
+    by1 = max(0, min(by1, img_h - 2))
+    bx2 = max(bx1 + 2, min(bx2, img_w - 1))
+    by2 = max(by1 + 2, min(by2, img_h - 1))
+
+    box_color = (16, 16, 20)
+    accent_color = (248, 189, 56) if ent.recovered else (44, 107, 255)
+
+    cv2.rectangle(annotated, (bx1, by1), (bx2, by2), (242, 242, 245), 4, lineType=cv2.LINE_AA)
+    cv2.rectangle(annotated, (bx1, by1), (bx2, by2), box_color, 2, lineType=cv2.LINE_AA)
+
+    corner = max(8, min(18, (bx2 - bx1) // 4, (by2 - by1) // 4))
+    cv2.line(annotated, (bx1, by1), (bx1 + corner, by1), accent_color, 3, lineType=cv2.LINE_AA)
+    cv2.line(annotated, (bx1, by1), (bx1, by1 + corner), accent_color, 3, lineType=cv2.LINE_AA)
+    cv2.line(annotated, (bx2, by1), (bx2 - corner, by1), accent_color, 3, lineType=cv2.LINE_AA)
+    cv2.line(annotated, (bx2, by1), (bx2, by1 + corner), accent_color, 3, lineType=cv2.LINE_AA)
+    cv2.line(annotated, (bx1, by2), (bx1 + corner, by2), accent_color, 3, lineType=cv2.LINE_AA)
+    cv2.line(annotated, (bx1, by2), (bx1, by2 - corner), accent_color, 3, lineType=cv2.LINE_AA)
+    cv2.line(annotated, (bx2, by2), (bx2 - corner, by2), accent_color, 3, lineType=cv2.LINE_AA)
+    cv2.line(annotated, (bx2, by2), (bx2, by2 - corner), accent_color, 3, lineType=cv2.LINE_AA)
+
+    suffix = " RE-ID" if ent.recovered else ""
+    label = f"#{ent.track_id} {ent.class_name.upper()} {ent.confidence:.2f}{suffix}"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.48
+    thickness = 1
+    (tw, th), baseline = cv2.getTextSize(label, font, scale, thickness)
+
+    pad_x = 8
+    pad_y = 5
+    pill_w = tw + pad_x * 2 + 4
+    pill_h = th + pad_y * 2 + baseline
+
+    px1 = max(0, min(bx1, img_w - pill_w))
+    px2 = min(img_w - 1, px1 + pill_w)
+    if by1 >= pill_h + 2:
+        py2 = by1 - 2
+        py1 = py2 - pill_h
+    else:
+        py1 = min(img_h - pill_h - 1, by1 + 2)
+        py2 = py1 + pill_h
+
+    cv2.rectangle(annotated, (px1, py1), (px2, py2), box_color, -1)
+    cv2.rectangle(annotated, (px1, py1), (px1 + 3, py2), accent_color, -1)
+    cv2.putText(
+        annotated,
+        label,
+        (px1 + pad_x + 3, py2 - pad_y - baseline + 1),
+        font,
+        scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA
+    )
+
+
 def load_class_names(yaml_path: Path) -> dict[int, str]:
     if not yaml_path.exists():
         return {0: "crack"}
@@ -178,14 +237,14 @@ class VisionPipelineWorker:
                     state.requested_model = None
 
             t0 = time.perf_counter()
-            frame = np.full((480, 640, 3), 24, dtype=np.uint8)
+            frame = np.full((480, 640, 3), 16, dtype=np.uint8)
             cv2.putText(
                 frame,
                 f"SENTINEL-EDGE v2.1 TEST | SRC: {state.source_label}",
                 (28, 225),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.62,
-                (56, 189, 248),
+                (44, 107, 255),
                 2,
                 cv2.LINE_AA
             )
@@ -195,7 +254,7 @@ class VisionPipelineWorker:
                 (28, 260),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.52,
-                (148, 163, 184),
+                (158, 163, 175),
                 1,
                 cv2.LINE_AA
             )
@@ -326,14 +385,14 @@ class VisionPipelineWorker:
 
                 ret, frame = camera.read_latest()
                 if not ret or frame is None:
-                    standby = np.full((480, 640, 3), 18, dtype=np.uint8)
+                    standby = np.full((480, 640, 3), 14, dtype=np.uint8)
                     cv2.putText(
                         standby,
                         f"CAMERA STATUS: {state.camera_status.upper()}",
                         (145, 225),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.72,
-                        (251, 191, 36),
+                        (44, 107, 255),
                         2,
                         cv2.LINE_AA
                     )
@@ -343,7 +402,7 @@ class VisionPipelineWorker:
                         (145, 262),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.52,
-                        (148, 163, 184),
+                        (158, 163, 175),
                         1,
                         cv2.LINE_AA
                     )
@@ -446,21 +505,7 @@ class VisionPipelineWorker:
                 annotated = tracker.annotate_traces(annotated, tracked_detections)
 
                 for ent in entities:
-                    bx1, by1, bx2, by2 = map(int, ent.bbox_xyxy)
-                    box_color = (56, 189, 248) if ent.recovered else (34, 197, 94)
-                    suffix = " [RE-ID]" if ent.recovered else ""
-                    label = f"#{ent.track_id} {ent.class_name} {ent.confidence:.2f}{suffix}"
-                    cv2.rectangle(annotated, (bx1, by1), (bx2, by2), box_color, 2, cv2.LINE_AA)
-                    cv2.putText(
-                        annotated,
-                        label,
-                        (bx1, max(by1 - 8, 18)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        box_color,
-                        2,
-                        cv2.LINE_AA
-                    )
+                    draw_crack_detection(annotated, ent)
 
                 jpeg = self._encode_jpeg(annotated, quality=80)
                 if jpeg is not None:

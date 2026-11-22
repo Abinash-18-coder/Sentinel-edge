@@ -13,6 +13,7 @@ import psutil
 import yaml
 from ultralytics import YOLO
 
+from src.api.server import draw_crack_detection
 from src.perception.camera_stream import UniversalCameraStream, parse_camera_source
 from src.perception.reid_tracker import DeepReIDTracker
 from src.rules.incident_buffer import IncidentVideoBuffer
@@ -132,27 +133,13 @@ def run_pipeline(
             annotated = tracker.annotate_traces(annotated, tracked_detections)
 
             for ent in entities:
-                bx1, by1, bx2, by2 = map(int, ent.bbox_xyxy)
-                color = (56, 189, 248) if ent.recovered else (34, 197, 94)
-                suffix = " [RE-ID]" if ent.recovered else ""
-                label = f"#{ent.track_id} {ent.class_name} {ent.confidence:.2f}{suffix}"
-                cv2.rectangle(annotated, (bx1, by1), (bx2, by2), color, 2, cv2.LINE_AA)
-                cv2.putText(
-                    annotated,
-                    label,
-                    (bx1, max(by1 - 8, 18)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    color,
-                    2,
-                    cv2.LINE_AA
-                )
+                draw_crack_detection(annotated, ent)
 
             ram_free_gb = psutil.virtual_memory().available / (1024 ** 3)
-            cv2.rectangle(annotated, (10, 10), (370, 96), (18, 18, 28), -1)
-            cv2.putText(annotated, f"FPS: {fps:.1f} | Tracks: {len(entities)} | RAM Free: {ram_free_gb:.2f}GB", (18, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (34, 197, 94), 1, cv2.LINE_AA)
-            cv2.putText(annotated, f"Incidents: {anomalies_count} | Buf: {incident_buffer.estimate_buffer_ram_mb():.1f}MB", (18, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (244, 63, 94) if anomalies_count else (226, 232, 240), 1, cv2.LINE_AA)
-            cv2.putText(annotated, f"Model: {weights_path.name}", (18, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (148, 163, 184), 1, cv2.LINE_AA)
+            cv2.rectangle(annotated, (10, 10), (370, 96), (16, 16, 20), -1)
+            cv2.putText(annotated, f"FPS: {fps:.1f} | Tracks: {len(entities)} | RAM Free: {ram_free_gb:.2f}GB", (18, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (244, 244, 240), 1, cv2.LINE_AA)
+            cv2.putText(annotated, f"Incidents: {anomalies_count} | Buf: {incident_buffer.estimate_buffer_ram_mb():.1f}MB", (18, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (44, 107, 255) if anomalies_count else (200, 204, 212), 1, cv2.LINE_AA)
+            cv2.putText(annotated, f"Model: {weights_path.name}", (18, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (142, 147, 158), 1, cv2.LINE_AA)
 
             cv2.imshow("SentinelEdge v2.1 Desktop HUD", annotated)
             if cv2.waitKey(1) & 0xFF == ord("q"):
