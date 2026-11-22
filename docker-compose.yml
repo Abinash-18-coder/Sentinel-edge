@@ -3,14 +3,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: sentineledge:v2.0
+    image: sentineledge:v2.1
     container_name: sentineledge-edge-node
     ports:
       - "8000:8000"
     environment:
       - SENTINEL_SOURCE=${SENTINEL_SOURCE:-/app/data/raw/test_feed.mp4}
       - SENTINEL_TEST_MODE=${SENTINEL_TEST_MODE:-0}
+      - SENTINEL_MODEL=${SENTINEL_MODEL:-best.onnx}
+      - SENTINEL_PIXELS_PER_MM=${SENTINEL_PIXELS_PER_MM:-0}
       - VLM_API_URL=${VLM_API_URL:-}
+      - VLM_API_KEY=${VLM_API_KEY:-}
       - OMP_NUM_THREADS=2
     volumes:
       - ./configs:/app/configs
