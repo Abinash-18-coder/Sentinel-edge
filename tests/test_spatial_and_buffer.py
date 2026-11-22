@@ -32,32 +32,42 @@ def test_polygon_state_machine_and_cooldown() -> None:
     engine = SpatialRulesEngine(config_yaml=zones_yaml, frame_resolution_wh=(640, 480))
     class_map = {0: "crack"}
 
-    inside_det = make_detection(track_id=1, cx=160.0, cy=240.0, cls_id=0)
+    zone_cfg = engine.zones[0]
+    warn_s = zone_cfg["dwell_warning_sec"]
+    breach_s = zone_cfg["dwell_breach_sec"]
+    cool_s = zone_cfg["cooldown_sec"]
+
+    inside_det = make_detection(track_id=1, cx=320.0, cy=240.0, cls_id=0)
     t0 = 1000.0
 
     events_0 = engine.evaluate(inside_det, class_map, current_time=t0)
     assert len(events_0) == 0
     assert engine.get_track_state("zone_alpha_danger", 1) == AnomalyState.IDLE
 
-    events_1 = engine.evaluate(inside_det, class_map, current_time=t0 + 1.2)
+    t_warn = t0 + (warn_s + breach_s) / 2.0
+    events_1 = engine.evaluate(inside_det, class_map, current_time=t_warn)
     assert len(events_1) == 0
     assert engine.get_track_state("zone_alpha_danger", 1) == AnomalyState.WARNING
 
-    events_2 = engine.evaluate(inside_det, class_map, current_time=t0 + 2.6)
+    t_breach = t0 + breach_s + 0.1
+    events_2 = engine.evaluate(inside_det, class_map, current_time=t_breach)
     assert len(events_2) == 1
     assert events_2[0].rule_type == "polygon_zone"
     assert events_2[0].class_name == "crack"
     assert engine.get_track_state("zone_alpha_danger", 1) == AnomalyState.COOLDOWN
 
-    events_spam = engine.evaluate(inside_det, class_map, current_time=t0 + 5.0)
+    t_spam = t_breach + (cool_s * 0.5)
+    events_spam = engine.evaluate(inside_det, class_map, current_time=t_spam)
     assert len(events_spam) == 0
     assert engine.get_track_state("zone_alpha_danger", 1) == AnomalyState.COOLDOWN
 
-    events_reset = engine.evaluate(inside_det, class_map, current_time=t0 + 12.7)
+    t_reset = t_breach + cool_s + 0.1
+    events_reset = engine.evaluate(inside_det, class_map, current_time=t_reset)
     assert len(events_reset) == 0
     assert engine.get_track_state("zone_alpha_danger", 1) == AnomalyState.IDLE
 
-    events_reconfirm = engine.evaluate(inside_det, class_map, current_time=t0 + 15.3)
+    t_reconfirm = t_reset + breach_s + 0.1
+    events_reconfirm = engine.evaluate(inside_det, class_map, current_time=t_reconfirm)
     assert len(events_reconfirm) == 1
     print("[+] Test 1 Passed: IDLE -> WARNING -> CONFIRMED -> COOLDOWN -> CLEAN RESET verified.")
 
@@ -91,6 +101,8 @@ def test_circular_buffer_ram_and_mp4_output() -> None:
 
     zones_yaml = PROJECT_ROOT / "configs" / "zones.yaml"
     engine = SpatialRulesEngine(config_yaml=zones_yaml, frame_resolution_wh=(640, 480))
+    breach_s = engine.zones[0]["dwell_breach_sec"]
+
     buf = IncidentVideoBuffer(
         output_dir=temp_dir,
         pre_incident_seconds=1.0,
@@ -105,9 +117,9 @@ def test_circular_buffer_ram_and_mp4_output() -> None:
         cv2.putText(f, f"PRE-{i}", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (20, 20, 20), 2)
         buf.push_frame(f)
 
-    inside_det = make_detection(track_id=9, cx=160.0, cy=240.0, cls_id=0)
+    inside_det = make_detection(track_id=9, cx=320.0, cy=240.0, cls_id=0)
     engine.evaluate(inside_det, {0: "crack"}, current_time=3000.0)
-    triggered = engine.evaluate(inside_det, {0: "crack"}, current_time=3003.0)
+    triggered = engine.evaluate(inside_det, {0: "crack"}, current_time=3000.0 + breach_s + 0.2)
     assert len(triggered) == 1
 
     expected_mp4 = buf.trigger_incident_capture(triggered[0])
@@ -145,11 +157,11 @@ def test_circular_buffer_ram_and_mp4_output() -> None:
 
 if __name__ == "__main__":
     print("=" * 65)
-    print(" SentinelEdge v2.0: Day 12-14 Spatial Rules & Ring Buffer Suite")
+    print(" SentinelEdge v2.1: Spatial Rules & Ring Buffer Suite")
     print("=" * 65)
     test_polygon_state_machine_and_cooldown()
     test_tripwire_crossing_and_debounce()
     test_circular_buffer_ram_and_mp4_output()
     print("=" * 65)
-    print(" ALL DAY 12-14 SPATIAL RULES & BUFFER TESTS PASSED!")
+    print(" ALL SPATIAL RULES & BUFFER TESTS PASSED!")
     print("=" * 65)

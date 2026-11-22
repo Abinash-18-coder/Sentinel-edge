@@ -6,12 +6,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import gc
+import os
 import time
 import cv2
 import psutil
 import yaml
 from ultralytics import YOLO
 
+from src.perception.camera_stream import UniversalCameraStream, parse_camera_source
 from src.perception.reid_tracker import DeepReIDTracker
 from src.rules.incident_buffer import IncidentVideoBuffer
 from src.rules.spatial_engine import SpatialRulesEngine
@@ -28,11 +30,11 @@ def load_classes(yaml_path: Path) -> dict[int, str]:
 
 def resolve_best_model() -> Path:
     candidates = [
-        PROJECT_ROOT / "models" / "onnx" / "best_int8.onnx",
         PROJECT_ROOT / "models" / "onnx" / "best.onnx",
+        PROJECT_ROOT / "models" / "onnx" / "best_fp16.onnx",
         PROJECT_ROOT / "models" / "weights" / "best.pt",
-        PROJECT_ROOT / "yolo26n.pt",
-        PROJECT_ROOT / "yolo11n.pt"
+        PROJECT_ROOT / "models" / "onnx" / "best_int8.onnx",
+        PROJECT_ROOT / "yolo26n.pt"
     ]
     for path in candidates:
         if path.exists():
@@ -45,28 +47,20 @@ def run_pipeline(
     zones_yaml: Path,
     data_yaml: Path,
     source: int | str = 0,
-    conf_threshold: float = 0.30,
-    resolution: tuple[int, int] = (640, 480)
+    conf_threshold: float = 0.25
 ) -> None:
     print("=" * 65)
-    print(" SentinelEdge v2.0: Desktop HUD Pipeline (ONNX + Re-ID + VLM)")
+    print(" SentinelEdge v2.1: Desktop HUD (Universal Camera + FP32 ONNX)")
     print("=" * 65)
 
-    cap = cv2.VideoCapture(source)
-    if not cap.isOpened():
-        print(f"[X] Cannot open video source: {source}")
+    camera = UniversalCameraStream(source=source, max_width=640).start()
+    ok, init_frame = camera.wait_for_first_frame(timeout_sec=5.0)
+    if not ok or init_frame is None:
+        print(f"[X] Cannot read frames from source: {source}")
+        camera.stop()
         sys.exit(1)
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, resolution[0])
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution[1])
-
-    success, test_frame = cap.read()
-    if not success or test_frame is None:
-        print("[X] Failed to fetch initial frame from video source.")
-        cap.release()
-        sys.exit(1)
-
-    actual_h, actual_w = test_frame.shape[:2]
+    actual_h, actual_w = init_frame.shape[:2]
     frame_wh = (actual_w, actual_h)
     print(f"[+] Stream online: {actual_w}x{actual_h} px | Model: {weights_path.name}")
 
@@ -80,12 +74,12 @@ def run_pipeline(
         output_dir=incidents_dir,
         pre_incident_seconds=3.0,
         post_incident_seconds=3.0,
-        fps=30,
+        fps=25,
         resolution_wh=frame_wh
     )
     async_auditor = AsyncIncidentAuditor(
         max_queue_size=12,
-        track_debounce_sec=8.0,
+        track_debounce_sec=6.0,
         vlm_mode="auto"
     )
 
@@ -94,10 +88,11 @@ def run_pipeline(
     print("[+] Pipeline running. Press 'q' in video window to quit.\n")
 
     try:
-        while cap.isOpened():
-            ret, frame = cap.read()
+        while True:
+            ret, frame = camera.read_latest()
             if not ret or frame is None:
-                break
+                time.sleep(0.02)
+                continue
 
             now = time.perf_counter()
             fps = 1.0 / max(now - prev_time, 1e-5)
@@ -159,11 +154,11 @@ def run_pipeline(
             cv2.putText(annotated, f"Incidents: {anomalies_count} | Buf: {incident_buffer.estimate_buffer_ram_mb():.1f}MB", (18, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (244, 63, 94) if anomalies_count else (226, 232, 240), 1, cv2.LINE_AA)
             cv2.putText(annotated, f"Model: {weights_path.name}", (18, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (148, 163, 184), 1, cv2.LINE_AA)
 
-            cv2.imshow("SentinelEdge v2.0 Desktop HUD", annotated)
+            cv2.imshow("SentinelEdge v2.1 Desktop HUD", annotated)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
     finally:
-        cap.release()
+        camera.stop(timeout_sec=5.0)
         cv2.destroyAllWindows()
         incident_buffer.flush_and_shutdown(timeout=8.0)
         async_auditor.shutdown(timeout=8.0)
@@ -173,10 +168,11 @@ def run_pipeline(
 
 
 if __name__ == "__main__":
+    env_source = parse_camera_source(os.getenv("SENTINEL_SOURCE", "0"))
     run_pipeline(
         weights_path=resolve_best_model(),
         zones_yaml=PROJECT_ROOT / "configs" / "zones.yaml",
         data_yaml=PROJECT_ROOT / "configs" / "data.yaml",
-        source=0,
-        conf_threshold=0.30
+        source=env_source,
+        conf_threshold=0.25
     )

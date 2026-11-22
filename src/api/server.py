@@ -22,11 +22,26 @@ import yaml
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from src.api.exporter import IncidentExporter
 from src.data.analytics_db import SentinelAnalyticsDB
 from src.data.heatmap_engine import SpatialHeatmapEngine
+from src.perception.camera_stream import (
+    UniversalCameraStream,
+    format_source_label,
+    parse_camera_source
+)
 from src.vlm.schemas import IncidentAuditReport
+
+
+class SourceSwitchRequest(BaseModel):
+    source: str = Field(min_length=1, max_length=300)
+
+
+class InferenceConfigRequest(BaseModel):
+    conf_threshold: float | None = Field(default=None, ge=0.05, le=0.95)
+    model_name: str | None = Field(default=None, min_length=3, max_length=80)
 
 
 class PipelineState:
@@ -38,7 +53,13 @@ class PipelineState:
         self.total_anomalies: int = 0
         self.buffer_ram_mb: float = 0.0
         self.model_name: str = "initializing"
-        self.source_label: str = "webcam:0"
+        self.source_raw: str = "0"
+        self.source_label: str = "cam:0"
+        self.camera_status: str = "initializing"
+        self.conf_threshold: float = 0.25
+        self.requested_source: str | None = None
+        self.requested_model: str | None = None
+        self.control_lock = threading.Lock()
         self.latest_jpeg: bytes | None = None
         self.latest_raw_frame: np.ndarray | None = None
         self.frame_lock = threading.Lock()
@@ -63,25 +84,34 @@ def load_class_names(yaml_path: Path) -> dict[int, str]:
     return {int(k): str(v) for k, v in data.get("names", {0: "crack"}).items()}
 
 
-def resolve_model_path() -> Path:
-    candidates = [
-        PROJECT_ROOT / "models" / "onnx" / "best_int8.onnx",
+def list_available_models() -> dict[str, Path]:
+    ordered_candidates = [
         PROJECT_ROOT / "models" / "onnx" / "best.onnx",
+        PROJECT_ROOT / "models" / "onnx" / "best_fp16.onnx",
         PROJECT_ROOT / "models" / "weights" / "best.pt",
-        PROJECT_ROOT / "yolo26n.pt",
-        PROJECT_ROOT / "yolo11n.pt"
+        PROJECT_ROOT / "models" / "onnx" / "best_int8.onnx",
+        PROJECT_ROOT / "yolo26n.pt"
     ]
-    for path in candidates:
-        if path.exists():
-            return path
+    found: dict[str, Path] = {}
+    for p in ordered_candidates:
+        if p.exists():
+            found[p.name] = p
+    return found
+
+
+def resolve_model_path(preferred_name: str | None = None) -> Path:
+    available = list_available_models()
+    env_choice = (preferred_name or os.getenv("SENTINEL_MODEL", "")).strip()
+    if env_choice and env_choice in available:
+        return available[env_choice]
+    if available:
+        return next(iter(available.values()))
     return PROJECT_ROOT / "yolo26n.pt"
 
 
 def resolve_video_source() -> int | str:
     raw = os.getenv("SENTINEL_SOURCE", "0").strip()
-    if raw.isdigit():
-        return int(raw)
-    return raw
+    return parse_camera_source(raw if raw else "0")
 
 
 def get_system_ram_stats() -> tuple[float, float]:
@@ -125,26 +155,48 @@ class VisionPipelineWorker:
         if self._thread is not None:
             self._thread.join(timeout=8.0)
 
-    def _encode_jpeg(self, frame_bgr: np.ndarray, quality: int = 78) -> bytes | None:
+    def _encode_jpeg(self, frame_bgr: np.ndarray, quality: int = 80) -> bytes | None:
         ok, encoded = cv2.imencode(".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
         return encoded.tobytes() if ok else None
 
     def _run_test_loop(self) -> None:
         state.model_name = "test-synthetic-mode"
+        state.source_raw = "synthetic"
         state.source_label = "synthetic:640x480"
+        state.camera_status = "connected"
         frame_idx = 0
 
         while state.is_running:
+            with state.control_lock:
+                if state.requested_source is not None:
+                    parsed = parse_camera_source(state.requested_source)
+                    state.source_raw = str(parsed)
+                    state.source_label = format_source_label(parsed)
+                    state.requested_source = None
+                if state.requested_model is not None:
+                    state.model_name = state.requested_model
+                    state.requested_model = None
+
             t0 = time.perf_counter()
             frame = np.full((480, 640, 3), 24, dtype=np.uint8)
             cv2.putText(
                 frame,
-                f"SENTINEL-EDGE v2.0 TEST STREAM | FRAME {frame_idx}",
-                (30, 240),
+                f"SENTINEL-EDGE v2.1 TEST | SRC: {state.source_label}",
+                (28, 225),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
+                0.62,
                 (56, 189, 248),
                 2,
+                cv2.LINE_AA
+            )
+            cv2.putText(
+                frame,
+                f"MODEL: {state.model_name} | CONF: {state.conf_threshold:.2f} | FRAME {frame_idx}",
+                (28, 260),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.52,
+                (148, 163, 184),
+                1,
                 cv2.LINE_AA
             )
             if state.heatmap_engine is not None and frame_idx % 5 == 0:
@@ -207,28 +259,13 @@ class VisionPipelineWorker:
         class_map = load_class_names(PROJECT_ROOT / "configs" / "data.yaml")
         zones_cfg = PROJECT_ROOT / "configs" / "zones.yaml"
 
-        source = resolve_video_source()
-        state.source_label = f"cam:{source}" if isinstance(source, int) else Path(source).name
-        cap = cv2.VideoCapture(source)
+        initial_source = resolve_video_source()
+        state.source_raw = str(initial_source)
+        state.source_label = format_source_label(initial_source)
 
-        if not cap.isOpened():
-            fallback_vid = PROJECT_ROOT / "data" / "raw" / "test_feed.mp4"
-            if fallback_vid.exists():
-                print(f"[!] Primary source '{source}' unavailable. Switching to {fallback_vid.name}")
-                cap = cv2.VideoCapture(str(fallback_vid))
-                state.source_label = fallback_vid.name
-            else:
-                print(f"[!] Primary source '{source}' unavailable. Entering standby frame mode.")
-                state.source_label = "standby"
-
-        if cap.isOpened():
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            ret, init_frame = cap.read()
-        else:
-            ret, init_frame = False, None
-
-        if not ret or init_frame is None:
+        camera = UniversalCameraStream(source=initial_source, max_width=640).start()
+        ok, init_frame = camera.wait_for_first_frame(timeout_sec=4.0)
+        if not ok or init_frame is None:
             init_frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
         h, w = init_frame.shape[:2]
@@ -240,12 +277,12 @@ class VisionPipelineWorker:
             output_dir=INCIDENTS_DIR,
             pre_incident_seconds=3.0,
             post_incident_seconds=3.0,
-            fps=30,
+            fps=25,
             resolution_wh=frame_wh
         )
         async_auditor = AsyncIncidentAuditor(
             max_queue_size=12,
-            track_debounce_sec=8.0,
+            track_debounce_sec=6.0,
             vlm_mode="auto",
             on_report_callback=self._on_vlm_report
         )
@@ -256,31 +293,83 @@ class VisionPipelineWorker:
 
         try:
             while state.is_running:
-                loop_start = time.perf_counter()
+                with state.control_lock:
+                    req_src = state.requested_source
+                    state.requested_source = None
+                    req_model = state.requested_model
+                    state.requested_model = None
+                    active_conf = state.conf_threshold
 
-                if cap.isOpened():
-                    ret, frame = cap.read()
-                    if not ret or frame is None:
-                        if not isinstance(source, int):
-                            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        time.sleep(0.03)
-                        continue
-                else:
-                    frame = np.full((480, 640, 3), 20, dtype=np.uint8)
+                if req_src is not None:
+                    parsed_src = parse_camera_source(req_src)
+                    camera.switch_source(parsed_src)
+                    state.source_raw = str(parsed_src)
+                    state.source_label = format_source_label(parsed_src)
+
+                if req_model is not None:
+                    available = list_available_models()
+                    if req_model in available and req_model != state.model_name:
+                        print(f"[*] [VISION WORKER] Switching active model to {req_model}...")
+                        try:
+                            new_model = YOLO(str(available[req_model]), task="detect")
+                            del model
+                            gc.collect()
+                            model = new_model
+                            state.model_name = req_model
+                            print(f"[+] [VISION WORKER] Active model switched to {req_model}")
+                        except Exception as err:
+                            print(f"[!] [VISION WORKER] Failed switching model to {req_model}: {err}")
+
+                loop_start = time.perf_counter()
+                cam_info = camera.get_source_info()
+                state.camera_status = str(cam_info["status"])
+
+                ret, frame = camera.read_latest()
+                if not ret or frame is None:
+                    standby = np.full((480, 640, 3), 18, dtype=np.uint8)
                     cv2.putText(
-                        frame,
-                        "NO CAMERA DETECTED - STANDBY MODE",
-                        (110, 240),
+                        standby,
+                        f"CAMERA STATUS: {state.camera_status.upper()}",
+                        (145, 225),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (148, 163, 184),
+                        0.72,
+                        (251, 191, 36),
                         2,
                         cv2.LINE_AA
                     )
-                    time.sleep(0.05)
+                    cv2.putText(
+                        standby,
+                        f"SOURCE: {state.source_label}",
+                        (145, 262),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.52,
+                        (148, 163, 184),
+                        1,
+                        cv2.LINE_AA
+                    )
+                    jpeg = self._encode_jpeg(standby, quality=75)
+                    if jpeg is not None:
+                        with state.frame_lock:
+                            state.latest_jpeg = jpeg
+                    time.sleep(0.08)
+                    continue
+
+                fh, fw = frame.shape[:2]
+                if (fw, fh) != frame_wh:
+                    frame_wh = (fw, fh)
+                    spatial_engine = SpatialRulesEngine(config_yaml=zones_cfg, frame_resolution_wh=frame_wh)
+                    incident_buffer.flush_and_shutdown(timeout=4.0)
+                    incident_buffer = IncidentVideoBuffer(
+                        output_dir=INCIDENTS_DIR,
+                        pre_incident_seconds=3.0,
+                        post_incident_seconds=3.0,
+                        fps=25,
+                        resolution_wh=frame_wh
+                    )
+                    print(f"[+] [VISION WORKER] Adapted spatial zones & buffer to {fw}x{fh}")
 
                 frame_counter += 1
-                results = model.predict(frame, imgsz=640, conf=0.30, verbose=False)[0]
+                results = model.predict(frame, imgsz=640, conf=active_conf, verbose=False)[0]
                 tracked_detections, entities = tracker.update(
                     frame_bgr=frame,
                     ultralytics_results=results,
@@ -289,7 +378,6 @@ class VisionPipelineWorker:
                 state.active_tracks = len(entities)
 
                 if entities and frame_counter % 3 == 0:
-                    fh, fw = frame.shape[:2]
                     for ent in entities:
                         cx, cy = ent.center_xy
                         if state.heatmap_engine is not None:
@@ -347,7 +435,7 @@ class VisionPipelineWorker:
                         "dwell_time_seconds": round(ev.dwell_time, 2),
                         "readable_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ev.timestamp)),
                         "severity": "PENDING",
-                        "vlm_summary": "Running asynchronous VLM audit...",
+                        "vlm_summary": "Running crack morphology & VLM audit...",
                         "action": "Awaiting audit"
                     })
 
@@ -374,7 +462,7 @@ class VisionPipelineWorker:
                         cv2.LINE_AA
                     )
 
-                jpeg = self._encode_jpeg(annotated, quality=78)
+                jpeg = self._encode_jpeg(annotated, quality=80)
                 if jpeg is not None:
                     with state.frame_lock:
                         state.latest_jpeg = jpeg
@@ -387,8 +475,7 @@ class VisionPipelineWorker:
 
                 time.sleep(0.001)
         finally:
-            if cap.isOpened():
-                cap.release()
+            camera.stop(timeout_sec=5.0)
             incident_buffer.flush_and_shutdown(timeout=8.0)
             async_auditor.shutdown(timeout=8.0)
             del model
@@ -429,7 +516,7 @@ async def lifespan(app: FastAPI):
         state.analytics_db = None
 
 
-app = FastAPI(title="SentinelEdge v2.0 Operations Server", lifespan=lifespan)
+app = FastAPI(title="SentinelEdge v2.1 Operations Server", lifespan=lifespan)
 
 UI_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
@@ -455,6 +542,8 @@ async def health_check() -> dict[str, Any]:
         "status": "online" if state.is_running else "stopped",
         "model_name": state.model_name,
         "source": state.source_label,
+        "camera_status": state.camera_status,
+        "conf_threshold": state.conf_threshold,
         "fps": state.fps,
         "latency_ms": state.latency_ms,
         "active_tracks": state.active_tracks,
@@ -462,6 +551,53 @@ async def health_check() -> dict[str, Any]:
         "buffer_ram_mb": state.buffer_ram_mb,
         "ram_percent": ram_percent,
         "ram_free_gb": ram_free_gb
+    }
+
+
+@app.get("/api/config")
+async def get_runtime_config() -> dict[str, Any]:
+    return {
+        "source": state.source_raw,
+        "source_label": state.source_label,
+        "camera_status": state.camera_status,
+        "model_name": state.model_name,
+        "available_models": list(list_available_models().keys()),
+        "conf_threshold": state.conf_threshold
+    }
+
+
+@app.post("/api/camera/source")
+async def switch_camera_source(req: SourceSwitchRequest) -> dict[str, Any]:
+    cleaned = req.source.strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Camera source cannot be empty")
+    with state.control_lock:
+        state.requested_source = cleaned
+    return {
+        "status": "switching",
+        "requested_source": cleaned,
+        "label": format_source_label(parse_camera_source(cleaned))
+    }
+
+
+@app.post("/api/config/inference")
+async def update_inference_config(req: InferenceConfigRequest) -> dict[str, Any]:
+    available = list_available_models()
+    with state.control_lock:
+        if req.conf_threshold is not None:
+            state.conf_threshold = round(float(req.conf_threshold), 2)
+        if req.model_name is not None:
+            if os.getenv("SENTINEL_TEST_MODE", "0") != "1" and req.model_name not in available:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Model '{req.model_name}' not found. Available: {list(available.keys())}"
+                )
+            state.requested_model = req.model_name
+
+    return {
+        "status": "updated",
+        "conf_threshold": state.conf_threshold,
+        "requested_model": req.model_name or state.model_name
     }
 
 
@@ -547,7 +683,9 @@ async def websocket_stream_endpoint(websocket: WebSocket) -> None:
                     "ram_percent": ram_percent,
                     "ram_free_gb": ram_free_gb,
                     "model_name": state.model_name,
-                    "source": state.source_label
+                    "source": state.source_label,
+                    "camera_status": state.camera_status,
+                    "conf_threshold": state.conf_threshold
                 }
                 await websocket.send_text(json.dumps(telemetry))
 

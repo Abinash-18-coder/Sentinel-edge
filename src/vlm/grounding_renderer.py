@@ -39,7 +39,7 @@ class VisualGroundingRenderer:
             uy1 = max(0, min(uy1, img_h - 1))
             ux2 = max(0, min(ux2, img_w - 1))
             uy2 = max(0, min(uy2, img_h - 1))
-            cv2.rectangle(annotated, (ux1, uy1), (ux2, uy2), (80, 220, 80), 2, lineType=cv2.LINE_AA)
+            cv2.rectangle(annotated, (ux1, uy1), (ux2, uy2), (180, 180, 80), 1, lineType=cv2.LINE_AA)
 
         box = report.hazard_grounding_box
         px1 = max(0, min(int((box.xmin / 1000.0) * img_w), img_w - 1))
@@ -49,43 +49,56 @@ class VisualGroundingRenderer:
 
         cv2.rectangle(annotated, (px1, py1), (px2, py2), color, 3, lineType=cv2.LINE_AA)
 
-        hud_h = 64
-        cv2.rectangle(annotated, (0, 0), (img_w, hud_h), (42, 23, 15), -1)
+        hud_h = 68
+        cv2.rectangle(annotated, (0, 0), (img_w, hud_h), (28, 18, 12), -1)
 
         title_txt = f"[{report.severity.value}] {report.zone_id} | Track #{report.track_id} ({report.audit_latency_ms:.0f}ms)"
         cv2.putText(
             annotated,
-            title_txt,
-            (12, 24),
+            title_txt[:68],
+            (10, 22),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
+            0.48,
             color,
             2,
             cv2.LINE_AA
         )
 
-        action_txt = f"ACTION: {report.recommended_action[:65]}"
+        desc_txt = report.vlm_scene_description[:78]
         cv2.putText(
             annotated,
-            action_txt,
-            (12, 50),
+            desc_txt,
+            (10, 42),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.46,
-            (240, 232, 226),
+            0.39,
+            (226, 232, 240),
             1,
             cv2.LINE_AA
         )
 
-        tag_txt = f"GROUNDED: {report.entity_class.upper()}"
+        action_txt = f"ACTION: {report.recommended_action[:70]}"
+        cv2.putText(
+            annotated,
+            action_txt,
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.39,
+            (167, 243, 208),
+            1,
+            cv2.LINE_AA
+        )
+
+        tag_txt = f"CRACK: {report.severity.value}"
         (tw, th), _ = cv2.getTextSize(tag_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+        tag_x1 = max(0, min(px1, img_w - tw - 12))
+        tag_x2 = min(img_w - 1, tag_x1 + tw + 10)
         tag_y2 = max(py1, hud_h + th + 10)
         tag_y1 = tag_y2 - th - 8
-        tag_x2 = min(img_w - 1, px1 + tw + 10)
-        cv2.rectangle(annotated, (px1, tag_y1), (tag_x2, tag_y2), color, -1)
+        cv2.rectangle(annotated, (tag_x1, tag_y1), (tag_x2, tag_y2), color, -1)
         cv2.putText(
             annotated,
             tag_txt,
-            (px1 + 5, tag_y2 - 4),
+            (tag_x1 + 5, tag_y2 - 4),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.42,
             (255, 255, 255),

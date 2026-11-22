@@ -25,6 +25,18 @@ def create_crack_frame() -> np.ndarray:
     return frame
 
 
+def create_crack_plus_window_frame() -> np.ndarray:
+    rng = np.random.default_rng(42)
+    frame = rng.integers(210, 232, (480, 640, 3), dtype=np.uint8)
+    pts = np.array([[260, 90], [240, 175], [205, 255], [185, 340], [160, 415]], dtype=np.int32)
+    cv2.polylines(frame, [pts], isClosed=False, color=(45, 45, 45), thickness=4)
+
+    cv2.rectangle(frame, (470, 130), (540, 360), (255, 255, 255), -1)
+    cv2.rectangle(frame, (470, 130), (540, 360), (140, 140, 140), 10)
+    cv2.ellipse(frame, (505, 130), (35, 35), 0, 180, 360, (140, 140, 140), 10)
+    return frame
+
+
 def test_schema_and_json_parser() -> None:
     print("[*] Test 1: Verifying Pydantic Schema Ordering & Malformed JSON Recovery...")
     inverted = GroundingBoundingBox(ymin=800, xmin=700, ymax=200, xmax=100)
@@ -53,8 +65,33 @@ def test_schema_and_json_parser() -> None:
     print("[+] Test 1 Passed: Schema ordering, fenced JSON, and fallback recovery verified.")
 
 
+def test_crack_grounding_ignores_window() -> None:
+    print("[*] Test 2: Verifying Black-Hat Grounding Locks Onto Crack (Ignores Bright Arched Window)...")
+    frame = create_crack_plus_window_frame()
+    auditor = GroundedVLMAuditor(mode="auto")
+    report = auditor.audit_frame(
+        image_bgr=frame,
+        incident_id="inc_crack_vs_window",
+        zone_id="zone_alpha_danger",
+        track_id=1,
+        entity_class="crack",
+        hint_bbox_xyxy=(120.0, 70.0, 560.0, 430.0)
+    )
+
+    box = report.hazard_grounding_box
+    cx_px = ((box.xmin + box.xmax) / 2.0) / 1000.0 * 640.0
+    print(
+        f"    - Grounded Box (norm): [{box.ymin}, {box.xmin}, {box.ymax}, {box.xmax}] "
+        f"| Center X: {cx_px:.1f}px | Desc: {report.vlm_scene_description}"
+    )
+    assert cx_px < 360.0, f"Grounding wrongly locked onto right-side window (center X={cx_px:.1f}px)!"
+    assert "length" in report.vlm_scene_description.lower()
+    assert "width" in report.vlm_scene_description.lower()
+    print("[+] Test 2 Passed: Grounding locked onto diagonal crack and ignored arched window.")
+
+
 def test_async_worker_nonblocking_and_debounce() -> None:
-    print("[*] Test 2: Verifying Async VLM Queue (Non-Blocking 30 FPS + Debounce + Grounding)...")
+    print("[*] Test 3: Verifying Async VLM Queue (Non-Blocking 30 FPS + Debounce + Grounding)...")
     temp_dir = PROJECT_ROOT / "data" / "raw" / "incidents" / "_day15_vlm_test_tmp"
     if temp_dir.exists():
         shutil.rmtree(temp_dir)
@@ -129,15 +166,16 @@ def test_async_worker_nonblocking_and_debounce() -> None:
     assert rendered is not None and rendered.shape == frame.shape
 
     shutil.rmtree(temp_dir)
-    print(f"[+] Test 2 Passed: Non-blocking submit took {submit_ms:.2f}ms (<33ms), 2 audits + grounded renders verified.")
+    print(f"[+] Test 3 Passed: Non-blocking submit took {submit_ms:.2f}ms (<33ms), 2 audits + grounded renders verified.")
 
 
 if __name__ == "__main__":
     print("=" * 65)
-    print(" SentinelEdge v2.0: Day 15-18 Grounded VLM & Async Queue Suite")
+    print(" SentinelEdge v2.1: Grounded Crack Morphology & VLM Suite")
     print("=" * 65)
     test_schema_and_json_parser()
+    test_crack_grounding_ignores_window()
     test_async_worker_nonblocking_and_debounce()
     print("=" * 65)
-    print(" ALL DAY 15-18 VLM AUDITING & ASYNC QUEUE TESTS PASSED!")
+    print(" ALL VLM AUDITING & CRACK GROUNDING TESTS PASSED!")
     print("=" * 65)
