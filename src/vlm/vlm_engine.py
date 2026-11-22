@@ -40,10 +40,11 @@ class GroundedVLMAuditor:
         remote_api_url: str | None = None,
         remote_model_name: str | None = None,
         local_model_id: str | None = None,
-        request_timeout_sec: float = 20.0
+        request_timeout_sec: float = 25.0
     ) -> None:
         self.mode = mode.lower()
         self.remote_api_url = remote_api_url or os.getenv("VLM_API_URL", "").strip()
+        self.remote_api_key = os.getenv("VLM_API_KEY", "").strip()
         self.remote_model_name = remote_model_name or os.getenv("VLM_MODEL_NAME", self.REMOTE_MODEL_NAME)
         self.local_model_id = local_model_id or self.LOCAL_LIGHT_MODEL_ID
         self.request_timeout_sec = request_timeout_sec
@@ -113,18 +114,19 @@ class GroundedVLMAuditor:
 
     def _build_prompt(self, entity_class: str, zone_id: str) -> str:
         return (
-            "You are a civil structural crack inspector. "
+            "You are a licensed civil structural engineer performing a crack inspection. "
             f"Inspect ONLY the actual surface '{entity_class}' fissure inside zone '{zone_id}'. "
-            "Ignore windows, doors, cables, shadows, and wall edges. "
+            "Ignore windows, doors, frames, cables, shadows, and wall corners. "
+            "Describe crack pattern (hairline, diagonal, vertical, branching, spalling) and structural risk. "
             "Respond ONLY with a valid JSON object matching this exact schema: "
-            '{"scene_description": "concise 1-sentence structural finding", '
+            '{"scene_description": "concise 1-sentence engineering finding", '
             '"box_2d": [ymin, xmin, ymax, xmax], '
             '"severity": "LOW" | "MEDIUM" | "HIGH" | "CRITICAL", '
-            '"recommended_action": "action under 10 words"}. '
+            '"recommended_action": "concrete action under 10 words"}. '
             "box_2d coordinates must be integers from 0 to 1000 tightly enclosing the crack."
         )
 
-    def _encode_resized_jpeg_b64(self, image_bgr: np.ndarray, max_dim: int = 512) -> str:
+    def _encode_resized_jpeg_b64(self, image_bgr: np.ndarray, max_dim: int = 640) -> str:
         h, w = image_bgr.shape[:2]
         scale = min(1.0, max_dim / float(max(h, w)))
         if scale < 1.0:
@@ -136,7 +138,7 @@ class GroundedVLMAuditor:
         else:
             resized = image_bgr
 
-        ok, buf = cv2.imencode(".jpg", resized, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+        ok, buf = cv2.imencode(".jpg", resized, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         if not ok:
             raise RuntimeError("Failed to encode snapshot for VLM transport.")
         return base64.b64encode(buf.tobytes()).decode("ascii")
@@ -208,13 +210,20 @@ class GroundedVLMAuditor:
         zone_id: str,
         fallback_box: list[int]
     ) -> RawVLMOutput:
-        img_b64 = self._encode_resized_jpeg_b64(image_bgr, max_dim=512)
+        img_b64 = self._encode_resized_jpeg_b64(image_bgr, max_dim=640)
         prompt = self._build_prompt(entity_class, zone_id)
+
+        headers = {
+            "Content-Type": "application/json",
+            "ngrok-skip-browser-warning": "true"
+        }
+        if self.remote_api_key:
+            headers["Authorization"] = f"Bearer {self.remote_api_key}"
 
         payload = {
             "model": self.remote_model_name,
             "temperature": 0.0,
-            "max_tokens": 220,
+            "max_tokens": 240,
             "messages": [
                 {
                     "role": "user",
@@ -231,6 +240,7 @@ class GroundedVLMAuditor:
 
         resp = requests.post(
             self.remote_api_url,
+            headers=headers,
             json=payload,
             timeout=self.request_timeout_sec
         )
@@ -374,7 +384,8 @@ class GroundedVLMAuditor:
         image_bgr: np.ndarray,
         entity_class: str,
         zone_id: str,
-        hint_bbox_xyxy: tuple[float, float, float, float] | None = None
+        hint_bbox_xyxy: tuple[float, float, float, float] | None = None,
+        seg_mask: np.ndarray | None = None
     ) -> RawVLMOutput:
         h, w = image_bgr.shape[:2]
 
@@ -387,8 +398,16 @@ class GroundedVLMAuditor:
         else:
             x1, y1, x2, y2 = 0, 0, w, h
 
-        roi = image_bgr[y1:y2, x1:x2]
-        crack_mask = self._extract_crack_mask(roi)
+        crack_mask: np.ndarray | None = None
+        if seg_mask is not None and seg_mask.shape[:2] == (h, w):
+            roi_seg = (seg_mask[y1:y2, x1:x2] > 0).astype(np.uint8) * 255
+            if int(np.count_nonzero(roi_seg)) >= 16:
+                crack_mask = roi_seg
+
+        if crack_mask is None:
+            roi = image_bgr[y1:y2, x1:x2]
+            crack_mask = self._extract_crack_mask(roi)
+
         ys, xs = np.where(crack_mask > 0)
 
         if len(xs) >= 16:
@@ -488,7 +507,8 @@ class GroundedVLMAuditor:
         zone_id: str,
         track_id: int,
         entity_class: str,
-        hint_bbox_xyxy: tuple[float, float, float, float] | None = None
+        hint_bbox_xyxy: tuple[float, float, float, float] | None = None,
+        seg_mask: np.ndarray | None = None
     ) -> IncidentAuditReport:
         t0 = time.perf_counter()
         h, w = image_bgr.shape[:2]
@@ -510,11 +530,15 @@ class GroundedVLMAuditor:
             elif self.model is not None and self.processor is not None:
                 parsed = self._run_local_vlm(image_bgr, entity_class, zone_id, fallback_box)
             else:
-                parsed = self._run_edge_cv_audit(image_bgr, entity_class, zone_id, hint_bbox_xyxy)
+                parsed = self._run_edge_cv_audit(
+                    image_bgr, entity_class, zone_id, hint_bbox_xyxy, seg_mask=seg_mask
+                )
         except Exception as err:
             print(f"[!] Primary VLM backend ({self.active_backend}) failed: {err}. Switching to edge-cv-crack-morph.")
             used_backend = "edge-cv-crack-morph"
-            parsed = self._run_edge_cv_audit(image_bgr, entity_class, zone_id, hint_bbox_xyxy)
+            parsed = self._run_edge_cv_audit(
+                image_bgr, entity_class, zone_id, hint_bbox_xyxy, seg_mask=seg_mask
+            )
 
         latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
 
